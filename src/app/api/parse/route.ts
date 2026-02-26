@@ -5,78 +5,48 @@ const BodySchema = z.object({
   text: z.string().default("")
 });
 
-// MVP parser for Thai beverage orders (multi-items).
-// Supports phrases like:
-// - "ชานม 2 แก้ว โกโก้ 1 แก้ว"
-// - "ชาไทย 2 โกโก้ 1"
-// - "ชาไทย โกโก้"  -> qty defaults to 1 for each (assumes menu names are single tokens)
+// Regex-based parser for Thai beverage orders.
+// Handles input with or without spaces, e.g. "ชาเย็น2แก้วกาแฟ3แก้ว"
+// Pattern: (non-digit chars = name)(digits = qty)(optional แก้ว)
 function parseThaiOrder(text: string) {
+  const fillers = /(เอา|ขอ|หน่อย|ครับ|ค่ะ|นะ|ด้วย|กับ|และ)/g;
   const cleaned = (text || "")
-    .replace(/(เอา|ขอ|หน่อย|ครับ|ค่ะ|นะ|ด้วย)/g, "")
+    .replace(fillers, " ")
     .replace(/\s+/g, " ")
     .trim();
 
-  const unitWords = new Set(["แก้ว", "แก้วนึง", "แก้วหนึ่ง", "แก้วค่ะ", "แก้วครับ"]);
-  const conjWords = new Set(["กับ", "และ", ",", "ๆ"]);
-
-  const tokens = cleaned.split(" ").map((t) => t.trim()).filter(Boolean);
+  if (!cleaned) return { items: [] };
 
   type Item = { menuName: string; qty: number };
   const items: Item[] = [];
 
-  let nameTokens: string[] = [];
-  let sawQtyForCurrent = false;
+  // Primary regex: (name)(qty)(optional แก้ว variants)
+  const pattern = /(\D+?)(\d+)(?:แก้ว(?:นึง|หนึ่ง|ค่ะ|ครับ)?)?/g;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
 
-  function finalize(defaultQty = 1) {
-    const menuName = nameTokens.join(" ").trim();
-    if (menuName) {
-      items.push({ menuName, qty: defaultQty });
+  while ((match = pattern.exec(cleaned)) !== null) {
+    // Capture any unmatched text before this match as a separate item with qty=1
+    if (match.index > lastIndex) {
+      const gap = cleaned.slice(lastIndex, match.index).replace(/แก้ว(?:นึง|หนึ่ง|ค่ะ|ครับ)?/g, "").trim();
+      if (gap) items.push({ menuName: gap, qty: 1 });
     }
-    nameTokens = [];
-    sawQtyForCurrent = false;
+
+    const name = match[1].replace(/แก้ว(?:นึง|หนึ่ง|ค่ะ|ครับ)?/g, "").trim();
+    const qty = Math.max(1, parseInt(match[2], 10));
+    if (name) items.push({ menuName: name, qty });
+
+    lastIndex = pattern.lastIndex;
   }
 
-  for (const tok of tokens) {
-    if (!tok) continue;
-
-    // Ignore unit words
-    if (unitWords.has(tok)) continue;
-
-    // Conjunction / separator -> finalize current if any
-    if (conjWords.has(tok)) {
-      if (nameTokens.length) finalize(1);
-      continue;
-    }
-
-    // Number token
-    if (/^\d+$/.test(tok)) {
-      const qty = Math.max(1, parseInt(tok, 10));
-      if (nameTokens.length) {
-        items.push({ menuName: nameTokens.join(" ").trim(), qty });
-        nameTokens = [];
-        sawQtyForCurrent = true;
-        continue;
-      }
-      // If a number comes without a name, ignore it
-      continue;
-    }
-
-    // Heuristic: if we already have a single-token menuName without qty,
-    // and we see another word token, treat it as a new menu (qty defaults to 1)
-    // This makes "ชาไทย โกโก้" become 2 items.
-    if (nameTokens.length === 1 && !sawQtyForCurrent) {
-      // finalize previous token as an item with qty=1, start new
-      finalize(1);
-    }
-
-    nameTokens.push(tok);
+  // Remaining text after last match
+  if (lastIndex < cleaned.length) {
+    const remaining = cleaned.slice(lastIndex).replace(/แก้ว(?:นึง|หนึ่ง|ค่ะ|ครับ)?/g, "").trim();
+    if (remaining) items.push({ menuName: remaining, qty: 1 });
   }
 
-  // finalize remaining
-  if (nameTokens.length) finalize(1);
-
-  // If nothing parsed but there is text, return single item fallback
-  if (items.length === 0 && cleaned) {
+  // Fallback: if nothing parsed, return whole text as single item
+  if (items.length === 0) {
     return { items: [{ menuName: cleaned, qty: 1 }] };
   }
 

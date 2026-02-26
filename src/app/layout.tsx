@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Sarabun } from "next/font/google";
 import "./globals.css";
+import { getSession } from "@/lib/auth";
+import { NavBar } from "./NavBar";
 
 const sarabun = Sarabun({
   subsets: ["thai", "latin"],
@@ -12,7 +14,9 @@ export const metadata: Metadata = {
   description: "Voice order for beverage shop (Android)"
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const session = await getSession();
+
   return (
     <html lang="th">
       <body className={sarabun.className}>
@@ -24,12 +28,8 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-700">Beverage Staff Panel</p>
                   <h1 className="mt-1 text-2xl font-bold text-slate-900">🥤 Voice Order</h1>
                 </div>
-                <nav className="flex flex-wrap items-center gap-2">
-                  <a href="/" className="pill-link">รับออเดอร์</a>
-                  <a href="/orders" className="pill-link">รายการออเดอร์</a>
-                </nav>
+                <NavBar role={session?.role || null} username={session?.username || null} />
               </div>
-              <p className="mt-2 text-sm text-slate-700">สั่งเร็วขึ้นด้วยเสียง, ยืนยันรายการทันที และติดตามออเดอร์ล่าสุดได้ในหน้าเดียว</p>
             </div>
           </header>
           <main>{children}</main>
