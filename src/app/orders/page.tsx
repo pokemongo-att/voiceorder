@@ -53,18 +53,28 @@ export default async function OrdersPage() {
               </div>
 
               <ul className="mt-3 space-y-1.5">
-                {items.map((it) => (
-                  <li key={it.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
-                    <div>
-                      <span className="text-slate-700">{it.productNameSnapshot}</span>
-                      <span className="ml-2 text-xs text-slate-400">฿{Number(it.priceSnapshot)}/แก้ว</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs text-slate-500">x{it.qty}</span>
-                      <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-slate-700">฿{Number(it.subtotal)}</span>
-                    </div>
-                  </li>
-                ))}
+                {items.map((it) => {
+                  const tps = (it.toppingsSnapshot as any[]) ?? [];
+                  const sw = it.sweetness;
+                  return (
+                    <li key={it.id} className="flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2 text-sm">
+                      <div>
+                        <span className="text-slate-700">{it.productNameSnapshot}</span>
+                        {tps.length > 0 && (
+                          <span className="ml-1 text-xs text-orange-600">+{tps.map((t: any) => t.name).join("+")}</span>
+                        )}
+                        {sw && (
+                          <span className="ml-1 rounded bg-amber-100 px-1 py-0.5 text-[10px] text-amber-700">{sw}</span>
+                        )}
+                        <span className="ml-2 text-xs text-slate-400">฿{Number(it.priceSnapshot)}{Number(it.toppingTotal) > 0 ? `+${Number(it.toppingTotal)}` : ""}/แก้ว</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500">x{it.qty}</span>
+                        <span className="rounded-md bg-white px-2 py-1 text-xs font-semibold text-slate-700">฿{Number(it.subtotal)}</span>
+                      </div>
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           ))}

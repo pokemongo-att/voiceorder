@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, boolean, integer, numeric, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, boolean, integer, numeric, timestamp, index, jsonb } from "drizzle-orm/pg-core";
 
 // ---------- legacy (kept for backward compat) ----------
 export const menus = pgTable(
@@ -87,10 +87,28 @@ export const orderItems = pgTable(
     productNameSnapshot: text("product_name_snapshot").notNull(),
     priceSnapshot: numeric("price_snapshot", { precision: 10, scale: 2 }).notNull().default("0"),
     qty: integer("qty").notNull().default(1),
-    subtotal: numeric("subtotal", { precision: 10, scale: 2 }).notNull().default("0")
+    subtotal: numeric("subtotal", { precision: 10, scale: 2 }).notNull().default("0"),
+    toppingsSnapshot: jsonb("toppings_snapshot").default([]),
+    sweetness: text("sweetness"),
+    toppingTotal: numeric("topping_total", { precision: 10, scale: 2 }).notNull().default("0")
   },
   (t) => ({
     orderIdIdx: index("order_items_order_id_idx").on(t.orderId)
+  })
+);
+
+// ---------- toppings ----------
+export const toppings = pgTable(
+  "toppings",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    name: text("name").notNull().unique(),
+    price: numeric("price", { precision: 10, scale: 2 }).notNull().default("0"),
+    isActive: boolean("is_active").notNull().default(true),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
+  },
+  (t) => ({
+    nameIdx: index("toppings_name_idx").on(t.name)
   })
 );
 

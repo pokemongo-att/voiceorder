@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/db/client";
-import { products, orders, orderItems, shopSessions } from "@/db/schema";
+import { products, orders, orderItems, shopSessions, toppings } from "@/db/schema";
 import { eq, isNull, desc } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 
@@ -12,7 +12,9 @@ const BodySchema = z.object({
   staffId: z.string().optional(),
   items: z.array(z.object({
     menuName: z.string().min(1),
-    qty: z.number().int().min(1).default(1)
+    qty: z.number().int().min(1).default(1),
+    toppings: z.array(z.string()).default([]),
+    sweetness: z.string().nullable().default(null)
   })).min(1)
 });
 
@@ -48,10 +50,21 @@ export async function POST(req: Request) {
 
     const staffId = body.staffId || session.staffId || null;
 
+    // Load all active toppings for price lookup
+    const allToppings = await db.select().from(toppings).where(eq(toppings.isActive, true));
+    const toppingPriceMap = new Map<string, number>();
+    for (const t of allToppings) toppingPriceMap.set(t.name, Number(t.price));
+
     // Resolve prices and build items
     let totalAmount = 0;
     let totalQty = 0;
-    const resolvedItems: { productId: string; productNameSnapshot: string; priceSnapshot: string; qty: number; subtotal: string }[] = [];
+    const resolvedItems: {
+      productId: string; productNameSnapshot: string; priceSnapshot: string;
+      qty: number; subtotal: string;
+      toppingsSnapshot: { name: string; price: number }[];
+      sweetness: string | null;
+      toppingTotal: string;
+    }[] = [];
 
     for (const it of body.items) {
       const name = it.menuName.trim();
@@ -77,7 +90,18 @@ export async function POST(req: Request) {
       if (!product) throw new Error("Failed to resolve product: " + name);
 
       const price = Number(product.price);
-      const subtotal = price * it.qty;
+
+      // Resolve topping prices
+      const toppingsSnapshot: { name: string; price: number }[] = [];
+      let toppingTotal = 0;
+      for (const tpName of it.toppings) {
+        const tpPrice = toppingPriceMap.get(tpName) ?? 0;
+        toppingsSnapshot.push({ name: tpName, price: tpPrice });
+        toppingTotal += tpPrice;
+      }
+
+      const unitPrice = price + toppingTotal;
+      const subtotal = unitPrice * it.qty;
       totalAmount += subtotal;
       totalQty += it.qty;
 
@@ -86,7 +110,10 @@ export async function POST(req: Request) {
         productNameSnapshot: name,
         priceSnapshot: String(price),
         qty: it.qty,
-        subtotal: String(subtotal)
+        subtotal: String(subtotal),
+        toppingsSnapshot,
+        sweetness: it.sweetness,
+        toppingTotal: String(toppingTotal)
       });
     }
 
@@ -108,7 +135,14 @@ export async function POST(req: Request) {
     for (const item of resolvedItems) {
       await db.insert(orderItems).values({
         orderId,
-        ...item
+        productId: item.productId,
+        productNameSnapshot: item.productNameSnapshot,
+        priceSnapshot: item.priceSnapshot,
+        qty: item.qty,
+        subtotal: item.subtotal,
+        toppingsSnapshot: item.toppingsSnapshot,
+        sweetness: item.sweetness,
+        toppingTotal: item.toppingTotal
       });
     }
 
@@ -122,7 +156,10 @@ export async function POST(req: Request) {
         name: i.productNameSnapshot,
         price: Number(i.priceSnapshot),
         qty: i.qty,
-        subtotal: Number(i.subtotal)
+        subtotal: Number(i.subtotal),
+        toppings: i.toppingsSnapshot,
+        sweetness: i.sweetness,
+        toppingTotal: Number(i.toppingTotal)
       }))
     });
   } catch (err: any) {

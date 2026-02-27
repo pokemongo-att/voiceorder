@@ -1,9 +1,24 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 
-type ParsedItem = { menuName: string; qty: number; price?: number; subtotal?: number };
+type ParsedItem = {
+  menuName: string;
+  qty: number;
+  price?: number;
+  subtotal?: number;
+  toppings?: string[];
+  toppingPrices?: number[];
+  toppingTotal?: number;
+  sweetness?: string | null;
+  entryId: string; // links item back to the speech entry it came from
+};
 type StaffOption = { id: string; name: string };
+type ToppingInfo = { name: string; price: number };
+type SpeechEntry = { id: string; text: string };
+
+let _entrySeq = 0;
+function nextEntryId() { return `e${++_entrySeq}_${Date.now()}`; }
 
 function getSpeechRecognition(): any | null {
   if (typeof window === "undefined") return null;
@@ -13,16 +28,18 @@ function getSpeechRecognition(): any | null {
 
 export default function HomePage() {
   const [listening, setListening] = useState(false);
-  const [rawText, setRawText] = useState("");
+  const [manualText, setManualText] = useState("");
+  const [entries, setEntries] = useState<SpeechEntry[]>([]);
   const [items, setItems] = useState<ParsedItem[]>([]);
   const [status, setStatus] = useState<string>("");
   const [staffList, setStaffList] = useState<StaffOption[]>([]);
   const [selectedStaff, setSelectedStaff] = useState("");
   const [shopOpen, setShopOpen] = useState<boolean | null>(null);
+  const [toppingList, setToppingList] = useState<ToppingInfo[]>([]);
 
   const supported = useMemo(() => !!getSpeechRecognition(), []);
 
-  // Load staffs + shop status on mount
+  // Load staffs + shop status + toppings on mount
   useEffect(() => {
     fetch("/api/staffs").then((r) => r.json()).then((d) => {
       if (d.ok) setStaffList(d.staffs.map((s: any) => ({ id: s.id, name: s.name })));
@@ -30,12 +47,24 @@ export default function HomePage() {
     fetch("/api/shop").then((r) => r.json()).then((d) => {
       if (d.ok) setShopOpen(d.isOpen);
     });
+    fetch("/api/toppings").then((r) => r.json()).then((d) => {
+      if (d.ok) setToppingList(d.toppings.map((t: any) => ({ name: t.name, price: Number(t.price) })));
+    });
   }, []);
 
   const total = items.reduce((s, i) => s + (i.subtotal ?? 0), 0);
   const totalQty = items.reduce((s, i) => s + i.qty, 0);
 
-  async function parseText(text: string) {
+  const toppingMap = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of toppingList) m.set(t.name, t.price);
+    return m;
+  }, [toppingList]);
+
+  const addEntryAndParse = useCallback(async (text: string) => {
+    const entryId = nextEntryId();
+    setEntries((prev) => [...prev, { id: entryId, text }]);
+
     setStatus("กำลังแปลงข้อความเป็นรายการ...");
     const res = await fetch("/api/parse", {
       method: "POST",
@@ -44,8 +73,8 @@ export default function HomePage() {
     });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error || "Parse failed");
-    // Fetch prices for each item
-    const priced: ParsedItem[] = [];
+
+    // Fetch product prices
     const prodRes = await fetch("/api/products");
     const prodData = await prodRes.json();
     const productMap = new Map<string, number>();
@@ -53,24 +82,47 @@ export default function HomePage() {
       for (const p of prodData.products) productMap.set(p.name, Number(p.price));
     }
     const defaultPrice = 20;
+
+    const newItems: ParsedItem[] = [];
     for (const it of data.items ?? []) {
-      const price = productMap.get(it.menuName) ?? defaultPrice;
-      priced.push({ menuName: it.menuName, qty: it.qty, price, subtotal: price * it.qty });
+      const drinkPrice = productMap.get(it.menuName) ?? defaultPrice;
+      const tps: string[] = it.toppings ?? [];
+      const tpPrices: number[] = tps.map((t: string) => toppingMap.get(t) ?? 0);
+      const tpTotal = tpPrices.reduce((s: number, p: number) => s + p, 0);
+      const unitPrice = drinkPrice + tpTotal;
+      newItems.push({
+        menuName: it.menuName,
+        qty: it.qty,
+        price: drinkPrice,
+        toppings: tps,
+        toppingPrices: tpPrices,
+        toppingTotal: tpTotal,
+        sweetness: it.sweetness || null,
+        subtotal: unitPrice * it.qty,
+        entryId
+      });
     }
-    setItems(priced);
+
+    setItems((prev) => [...prev, ...newItems]);
     setStatus("");
-  }
+  }, [toppingMap]);
 
   async function saveOrder() {
     if (!items.length) return;
     setStatus("กำลังบันทึกออเดอร์...");
+    const rawText = entries.map((e) => e.text).join(", ");
     const res = await fetch("/api/orders", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         rawText,
         staffId: selectedStaff || undefined,
-        items: items.map((i) => ({ menuName: i.menuName, qty: i.qty }))
+        items: items.map((i) => ({
+          menuName: i.menuName,
+          qty: i.qty,
+          toppings: i.toppings ?? [],
+          sweetness: i.sweetness ?? null
+        }))
       })
     });
     const data = await res.json();
@@ -80,8 +132,9 @@ export default function HomePage() {
     }
     const confirmedAt = data.confirmedAt ? new Date(data.confirmedAt) : new Date();
     setStatus(`✅ บันทึกแล้ว (${confirmedAt.toLocaleString("th-TH")}) — ยอดรวม ฿${data.totalAmount}`);
-    setRawText("");
+    setEntries([]);
     setItems([]);
+    setManualText("");
   }
 
   const statusTone = status.startsWith("✅")
@@ -102,13 +155,30 @@ export default function HomePage() {
     rec.onstart = () => { setListening(true); setStatus("กำลังฟัง..."); };
     rec.onresult = async (e: any) => {
       const text: string = (e.results?.[0]?.[0]?.transcript || "").trim();
-      setRawText(text);
       setListening(false);
-      try { await parseText(text); } catch (err: any) { setStatus(err?.message || "Parse error"); }
+      if (text) {
+        try { await addEntryAndParse(text); } catch (err: any) { setStatus(err?.message || "Parse error"); }
+      }
     };
     rec.onerror = (e: any) => { setListening(false); setStatus("เกิดข้อผิดพลาด: " + (e?.error || "unknown")); };
     rec.onend = () => { setListening(false); };
     rec.start();
+  }
+
+  function removeEntry(entryId: string) {
+    setEntries((prev) => prev.filter((e) => e.id !== entryId));
+    setItems((prev) => prev.filter((i) => i.entryId !== entryId));
+  }
+
+  function removeItemAt(index: number) {
+    setItems((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function clearAll() {
+    setEntries([]);
+    setItems([]);
+    setManualText("");
+    setStatus("ล้างรายการทั้งหมดแล้ว");
   }
 
   // Shop closed banner
@@ -130,7 +200,7 @@ export default function HomePage() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="card-title">🎤 รับออเดอร์ด้วยเสียง</h2>
-            <p className="mt-1 text-sm text-slate-600">พูดชื่อเมนูและจำนวน แล้วระบบจะแปลงเป็นรายการทันที</p>
+            <p className="mt-1 text-sm text-slate-600">พูดได้หลายรอบ รายการจะต่อกันจนกว่าจะกดบันทึก</p>
           </div>
           <div className="flex items-center gap-2">
             <label className="text-xs font-medium text-slate-500">พนักงาน:</label>
@@ -167,28 +237,57 @@ export default function HomePage() {
         </div>
 
         <p className="mt-3 text-xs text-slate-500">
-          ตัวอย่าง: <b>ชาเย็น2แก้วกาแฟ3แก้ว</b> หรือ <b>ชานม 2 โกโก้ 1</b>
+          ตัวอย่าง: <b>ชาเย็นบุก2แก้ว</b> / <b>ชาเขียวหวานน้อย 2</b> / <b>โกโก้ เพิ่มครีมชีส 1</b>
         </p>
       </section>
 
-      {/* Voice text input */}
+      {/* Voice entries list + manual input */}
       <section className="card p-5">
         <h3 className="card-title">ข้อความจากเสียง</h3>
-        <p className="subtle mt-1">แก้ไขเองได้ก่อนกดบันทึก</p>
-        <textarea
-          value={rawText}
-          onChange={(e) => setRawText(e.target.value)}
-          placeholder="พิมพ์เองได้ เช่น ชาเย็น2แก้วกาแฟ3แก้ว"
-          rows={3}
-          className="soft-input mt-3 resize-y"
-        />
-        <button
-          onClick={() => rawText && parseText(rawText)}
-          disabled={!rawText}
-          className="mt-2 w-full rounded-xl border border-slate-200 bg-white py-2 text-sm font-semibold text-slate-700 transition hover:border-orange-300 disabled:opacity-40"
-        >
-          แปลงข้อความ
-        </button>
+        <p className="subtle mt-1">แต่ละรอบพูดจะต่อเป็นรายการ ลบได้ทีละรอบ</p>
+
+        {entries.length > 0 && (
+          <ul className="mt-3 space-y-1.5">
+            {entries.map((entry) => (
+              <li key={entry.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-2">
+                <span className="text-sm text-slate-700">{entry.text}</span>
+                <button
+                  onClick={() => removeEntry(entry.id)}
+                  className="shrink-0 rounded-md border border-rose-200 px-2 py-0.5 text-xs text-rose-600 hover:bg-rose-50"
+                >
+                  ❌
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <div className="mt-3 flex gap-2">
+          <input
+            value={manualText}
+            onChange={(e) => setManualText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && manualText.trim()) {
+                addEntryAndParse(manualText.trim());
+                setManualText("");
+              }
+            }}
+            placeholder="พิมพ์เพิ่มเอง เช่น ชาเย็นบุก 2"
+            className="soft-input flex-1"
+          />
+          <button
+            onClick={() => {
+              if (manualText.trim()) {
+                addEntryAndParse(manualText.trim());
+                setManualText("");
+              }
+            }}
+            disabled={!manualText.trim()}
+            className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-orange-300 disabled:opacity-40"
+          >
+            เพิ่ม
+          </button>
+        </div>
       </section>
 
       {/* Preview */}
@@ -203,34 +302,61 @@ export default function HomePage() {
         ) : (
           <>
             <ul className="mt-3 space-y-2">
-              {items.map((it, idx) => (
-                <li key={idx} className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <b className="text-slate-800">{it.menuName}</b>
-                      <span className="ml-2 text-xs text-slate-500">฿{it.price ?? 0}/แก้ว</span>
+              {items.map((it, idx) => {
+                const unitPrice = (it.price ?? 0) + (it.toppingTotal ?? 0);
+                return (
+                  <li key={idx} className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <b className="text-slate-800">{it.menuName}</b>
+                        {(it.toppings?.length ?? 0) > 0 && (
+                          <span className="ml-1 text-xs text-orange-600">+{it.toppings!.join("+")}</span>
+                        )}
+                        {it.sweetness && (
+                          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">{it.sweetness}</span>
+                        )}
+                        <span className="ml-2 text-xs text-slate-500">฿{unitPrice}/แก้ว</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          min={1}
+                          value={it.qty}
+                          onChange={(e) => {
+                            const v = Math.max(1, parseInt(e.target.value || "1", 10));
+                            setItems((prev) => prev.map((x, i) => {
+                              if (i !== idx) return x;
+                              const up = (x.price ?? 0) + (x.toppingTotal ?? 0);
+                              return { ...x, qty: v, subtotal: up * v };
+                            }));
+                          }}
+                          className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-sm"
+                        />
+                        <span className="min-w-[60px] text-right text-sm font-semibold text-slate-700">฿{it.subtotal ?? 0}</span>
+                        <button
+                          onClick={() => removeItemAt(idx)}
+                          className="rounded-md border border-rose-200 px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
+                        >
+                          ลบ
+                        </button>
+                      </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="number"
-                        min={1}
-                        value={it.qty}
-                        onChange={(e) => {
-                          const v = Math.max(1, parseInt(e.target.value || "1", 10));
-                          setItems((prev) => prev.map((x, i) => (i === idx ? { ...x, qty: v, subtotal: (x.price ?? 0) * v } : x)));
-                        }}
-                        className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-sm"
-                      />
-                      <span className="min-w-[60px] text-right text-sm font-semibold text-slate-700">฿{it.subtotal ?? 0}</span>
-                    </div>
-                  </div>
-                </li>
-              ))}
+                  </li>
+                );
+              })}
             </ul>
 
             <div className="mt-3 flex items-center justify-between rounded-xl bg-slate-900 px-4 py-3 text-white">
-              <span className="text-sm font-medium">รวมทั้งหมด</span>
-              <span className="text-lg font-bold">฿{total.toLocaleString()}</span>
+              <div>
+                <span className="text-sm font-medium">รวมทั้งหมด</span>
+                <span className="ml-2 text-lg font-bold">฿{total.toLocaleString()}</span>
+              </div>
+              <button
+                onClick={clearAll}
+                className="rounded-lg border border-white/30 px-3 py-1 text-xs font-semibold text-white hover:bg-white/10"
+              >
+                ล้างทั้งหมด
+              </button>
             </div>
           </>
         )}
