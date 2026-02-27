@@ -24,6 +24,60 @@ const SWEETNESS_RE =
 // These may appear standalone (with space) OR glued directly to the topping name
 const TOPPING_PREFIX_RE = /(?:เพิ่ม|บวก|ท็อป|ใส่|พร้อม)\s*(?:topping|ท็อปปิ้ง)?\s*|(?:^|\s)topping\s*/gi;
 
+// ── Normalize Thai text for fuzzy matching ──
+// 1. Strip ไม้ไต่คู้ (็) and ไม้ตรี (๊) and tone marks (่้๋๎)
+// 2. Normalize final consonant homophones: บ↔ป, ก↔ค↔ข↔ฆ, ด↔ต↔ถ↔ท↔ฏ↔ฐ↔ฑ↔ฒ
+function normThai(s: string): string {
+  return s
+    .replace(/[็๊่้๋๎]/g, "")               // strip tone/short marks
+    .replace(/[ปบพภผกขคฆ]$/u, "บ")        // final stop cluster: -p/-b/-k all sound alike in fast speech
+    .replace(/[ดตถทฏฐฑฒ]$/u, "ด");         // final -t/-d cluster
+}
+
+// Build normalized index: normKey → canonical DB name
+function buildNormIndex(names: string[]): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const n of names) m.set(normThai(n), n);
+  return m;
+}
+
+// Find best matching topping name in `text` using normalized comparison.
+// Returns { canonical, pos, len } of the leftmost longest match, or null.
+function findTopping(
+  text: string,
+  sortedNames: string[],
+  normIndex: Map<string, string>
+): { canonical: string; pos: number; len: number } | null {
+  // Try exact match first (longest-first already sorted)
+  for (const tp of sortedNames) {
+    const pos = text.indexOf(tp);
+    if (pos >= 0) return { canonical: tp, pos, len: tp.length };
+  }
+  // Try normalized match: slide a window of each topping length over text
+  for (const tp of sortedNames) {
+    const normTp = normThai(tp);
+    const len = tp.length;
+    // Slide over text positions
+    for (let i = 0; i <= text.length - len; i++) {
+      const slice = text.slice(i, i + len);
+      if (normThai(slice) === normTp) {
+        return { canonical: tp, pos: i, len };
+      }
+    }
+    // Also try shorter slices ±1 char for length mismatch (tone marks removed)
+    for (const tryLen of [len - 1, len + 1]) {
+      if (tryLen < 2 || tryLen > text.length) continue;
+      for (let i = 0; i <= text.length - tryLen; i++) {
+        const slice = text.slice(i, i + tryLen);
+        if (normThai(slice) === normTp) {
+          return { canonical: tp, pos: i, len: tryLen };
+        }
+      }
+    }
+  }
+  return null;
+}
+
 type SweetnessInfo = {
   label: string;      // e.g. "หวานน้อย50%" or "หวานมาก"
   forceQty1: boolean;  // true when number > 10 without explicit %
@@ -84,6 +138,8 @@ function parseThaiOrder(
   const sortedProducts = [...productNames].sort((a, b) => b.length - a.length);
   // Sort topping names longest first for greedy matching
   const sortedToppings = [...toppingNames].sort((a, b) => b.length - a.length);
+  // Normalized index for fuzzy topping matching
+  const toppingNormIndex = buildNormIndex(toppingNames);
 
   // ── Step 1: Split into raw chunks by regex: (non-digit text)(digits)(optional แก้ว) ──
   // Markers (§S0§ etc.) are non-digit so they stay with their chunk
@@ -150,33 +206,28 @@ function parseThaiOrder(
     // Do a global replace so all occurrences are removed
     t = t.replace(TOPPING_PREFIX_RE, " ").replace(/\s+/g, " ").trim();
 
-    // ── Extract toppings greedily (longest-first) BEFORE product match ──
-    // This ensures 'ไข่มุก' is consumed before 'บุก' can match as substring.
-    // We scan the full chunk text (product name still present) — that's fine because
-    // product names don't overlap with topping names in practice.
+    // ── Extract toppings greedily (longest-first, with fuzzy normalize) ──
     const foundToppings: string[] = [];
     let changed = true;
     while (changed) {
       changed = false;
-      // Always iterate in longest-first order
-      for (const tp of sortedToppings) {
-        const pos = t.indexOf(tp);
-        if (pos >= 0) {
-          foundToppings.push(tp);
-          t = (t.slice(0, pos) + " " + t.slice(pos + tp.length)).replace(/\s+/g, " ").trim();
-          changed = true;
-          break; // restart loop from longest after each removal
-        }
+      const hit = findTopping(t, sortedToppings, toppingNormIndex);
+      if (hit) {
+        foundToppings.push(hit.canonical);
+        t = (t.slice(0, hit.pos) + " " + t.slice(hit.pos + hit.len)).replace(/\s+/g, " ").trim();
+        changed = true;
       }
     }
 
-    // ── Partial suffix alias: 'มุก' → 'ไข่มุก', 'วุ้น' → first topping ending with 'วุ้น' etc. ──
-    // If any remaining word matches a suffix of a known topping, resolve it
+    // ── Partial suffix alias (normalized): 'มุก' → 'ไข่มุก' etc. ──
     const remainingWords = t.split(/\s+/).filter(Boolean);
     const resolvedWords: string[] = [];
     for (const word of remainingWords) {
+      if (word.length < 2) { resolvedWords.push(word); continue; }
+      const normWord = normThai(word);
+      // Exact suffix match (normalized)
       const aliasMatch = sortedToppings.find(
-        (tp) => tp !== word && tp.endsWith(word) && word.length >= 2
+        (tp) => tp !== word && normThai(tp).endsWith(normWord)
       );
       if (aliasMatch && !foundToppings.includes(aliasMatch)) {
         foundToppings.push(aliasMatch);
