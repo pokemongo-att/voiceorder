@@ -20,8 +20,9 @@ type ParsedItem = {
 const SWEETNESS_RE =
   /(หวานน้อย|หวานมาก|หวานปกติ|เพิ่มหวาน|ไม่(?:ใส่)?(?:น้ำตาล|หวาน)|หวาน)\s*(\d+)?\s*(%|เปอร์เซ็นต์)?/g;
 
-// Topping keyword prefixes (synonyms for "add topping")
-const TOPPING_KEYWORDS = /(?:เพิ่ม|บวก|top|ท็อป|ใส่|พร้อม)\s*(?:topping|ท็อปปิ้ง)?\s*/gi;
+// Topping verb prefixes — stripped before topping extraction
+// These may appear standalone (with space) OR glued directly to the topping name
+const TOPPING_PREFIX_RE = /(?:เพิ่ม|บวก|ท็อป|ใส่|พร้อม)\s*(?:topping|ท็อปปิ้ง)?\s*|(?:^|\s)topping\s*/gi;
 
 type SweetnessInfo = {
   label: string;      // e.g. "หวานน้อย50%" or "หวานมาก"
@@ -144,38 +145,54 @@ function parseThaiOrder(
     let qty = chunk.qty;
     if (forceQty1) qty = 1;
 
-    // Remove topping keyword prefixes
-    t = t.replace(TOPPING_KEYWORDS, " ").trim();
+    // ── Strip topping verb prefixes FIRST (before product match) ──
+    // Handles: ใส่บุก, เพิ่มไข่มุก, topping บุก, ท็อปบุก etc.
+    // Do a global replace so all occurrences are removed
+    t = t.replace(TOPPING_PREFIX_RE, " ").replace(/\s+/g, " ").trim();
 
-    // Try to match a known product name (longest first) from anywhere in the chunk
-    let matchedProduct: string | null = null;
-    for (const pn of sortedProducts) {
-      if (t.includes(pn)) {
-        matchedProduct = pn;
-        t = t.replace(pn, " ").trim();
-        break;
-      }
-    }
-
-    // Extract toppings from remaining text (greedy, longest first)
+    // ── Extract toppings greedily (longest-first) BEFORE product match ──
+    // This ensures 'ไข่มุก' is consumed before 'บุก' can match as substring.
+    // We scan the full chunk text (product name still present) — that's fine because
+    // product names don't overlap with topping names in practice.
     const foundToppings: string[] = [];
     let changed = true;
     while (changed) {
       changed = false;
+      // Always iterate in longest-first order
       for (const tp of sortedToppings) {
-        if (t.endsWith(tp)) {
-          foundToppings.unshift(tp);
-          t = t.slice(0, -tp.length).trim();
-          changed = true;
-          break;
-        }
-        const idx = t.indexOf(tp);
-        if (idx >= 0) {
+        const pos = t.indexOf(tp);
+        if (pos >= 0) {
           foundToppings.push(tp);
-          t = (t.slice(0, idx) + " " + t.slice(idx + tp.length)).trim();
+          t = (t.slice(0, pos) + " " + t.slice(pos + tp.length)).replace(/\s+/g, " ").trim();
           changed = true;
-          break;
+          break; // restart loop from longest after each removal
         }
+      }
+    }
+
+    // ── Partial suffix alias: 'มุก' → 'ไข่มุก', 'วุ้น' → first topping ending with 'วุ้น' etc. ──
+    // If any remaining word matches a suffix of a known topping, resolve it
+    const remainingWords = t.split(/\s+/).filter(Boolean);
+    const resolvedWords: string[] = [];
+    for (const word of remainingWords) {
+      const aliasMatch = sortedToppings.find(
+        (tp) => tp !== word && tp.endsWith(word) && word.length >= 2
+      );
+      if (aliasMatch && !foundToppings.includes(aliasMatch)) {
+        foundToppings.push(aliasMatch);
+      } else {
+        resolvedWords.push(word);
+      }
+    }
+    t = resolvedWords.join(" ").trim();
+
+    // ── Match product name (longest first) from remaining text ──
+    let matchedProduct: string | null = null;
+    for (const pn of sortedProducts) {
+      if (t.includes(pn)) {
+        matchedProduct = pn;
+        t = t.replace(pn, " ").replace(/\s+/g, " ").trim();
+        break;
       }
     }
 
