@@ -24,15 +24,54 @@ const SWEETNESS_RE =
 // These may appear standalone (with space) OR glued directly to the topping name
 const TOPPING_PREFIX_RE = /(?:เพิ่ม|บวก|ท็อป|ใส่|พร้อม)\s*(?:topping|ท็อปปิ้ง)?\s*|(?:^|\s)topping\s*/gi;
 
+// Latin → Thai phonetic substitution — applied BEFORE topping extraction
+// so "มุก Pop" becomes "มุกป๊อป" and can match "มุกป๊อป" topping name
+const LATIN_TO_THAI: [RegExp, string][] = [
+  [/\bpopping\b/gi, "ป๊อป"],
+  [/\bpop\b/gi,     "ป๊อป"],
+  [/\bstrawberry\b/gi, "สตรอ"],
+  [/\bstraw\b/gi,   "สตรอ"],
+  [/\bapple\b/gi,   "แอปเปิ้ล"],
+  [/\btaro\b/gi,    "เผือก"],
+  [/\bmatcha\b/gi,  "มัทฉะ"],
+];
+
+// Word-level Thai alias substitutions for common speech-recognition errors
+// Applied before topping matching
+const WORD_ALIASES: [RegExp, string][] = [
+  [/กรีน/g, "ครีม"],  // กรีนชีค → ครีมชีส
+  [/กรีม/g, "ครีม"],  // กรีม → ครีม
+  [/ชีค/g,  "ชีส"],   // ชีค → ชีส
+  [/ชี่/g,  "ชีส"],   // ชี่ → ชีส
+];
+
+// Leftover Latin fragment strip (fallback after topping extraction)
+const LATIN_TOPPING_FRAGMENTS = /\b(?:pop|popping|strawberry|straw|apple|taro|matcha|coffee|choco|brown|sugar|cream|cheese|green|black|white|original|classic)\b/gi;
+
 // ── Normalize Thai text for fuzzy matching ──
 // 1. Strip ไม้ไต่คู้ (็) and ไม้ตรี (๊) and tone marks (่้๋๎)
-// 2. Normalize final consonant homophones: บ↔ป, ก↔ค↔ข↔ฆ, ด↔ต↔ถ↔ท↔ฏ↔ฐ↔ฑ↔ฒ
+// 2. Normalize initial cluster กร→คร (กรีน→ครีน) for ครีมชีส vs กรีนชีค
+// 3. Normalize final consonant homophones
 function normThai(s: string): string {
   return s
     .replace(/[็๊่้๋๎]/g, "")               // strip tone/short marks
-    .replace(/[ปบพภผกขคฆ]$/u, "บ")        // final stop cluster: -p/-b/-k all sound alike in fast speech
+    .replace(/^กร/u, "คร")                  // initial กร→คร (กรีน↔ครีม)
+    .replace(/กร(?=[ีิ])/gu, "คร")          // mid-word กร+vowel
+    .replace(/[ปบพภผกขคฆ]$/u, "บ")        // final stop cluster
     .replace(/[ดตถทฏฐฑฒ]$/u, "ด");         // final -t/-d cluster
 }
+
+// Product name aliases: speech often drops the prefix (ชา, ช้า)
+// Map normalized/short form → full product name pattern to try
+const PRODUCT_ALIASES: [RegExp, string][] = [
+  [/^เขียว/u,        "ชาเขียว"],
+  [/^เย็น(?!ชา)/u,   "ชาเย็น"],
+  [/^แดงเย็น/u,      "ชาแดงเย็น"],
+  [/^แร่เย็น/u,      "ชาแดงเย็น"],
+  [/^แร์เย็น/u,      "ชาแดงเย็น"],
+  [/^โกโก้$/u,       "โกโก้"],
+  [/^โลโก้/u,        "โลโก้"],
+];
 
 // Build normalized index: normKey → canonical DB name
 function buildNormIndex(names: string[]): Map<string, string> {
@@ -43,33 +82,31 @@ function buildNormIndex(names: string[]): Map<string, string> {
 
 // Find best matching topping name in `text` using normalized comparison.
 // Returns { canonical, pos, len } of the leftmost longest match, or null.
+// Tries exact match first (longest-first), then normalized fuzzy match.
 function findTopping(
   text: string,
   sortedNames: string[],
   normIndex: Map<string, string>
 ): { canonical: string; pos: number; len: number } | null {
-  // Try exact match first (longest-first already sorted)
+  // Pass 1: exact substring match (longest-first guarantees ไข่มุกป๊อป before ไข่มุก)
   for (const tp of sortedNames) {
     const pos = text.indexOf(tp);
     if (pos >= 0) return { canonical: tp, pos, len: tp.length };
   }
-  // Try normalized match: slide a window of each topping length over text
+  // Pass 2: normalized fuzzy match (handles มุกป๊อบ ↔ มุกป๊อป, กรีนชีค ↔ ครีมชีส)
+  // Slide window of each topping's length; also try ±1 for removed tone marks
   for (const tp of sortedNames) {
     const normTp = normThai(tp);
     const len = tp.length;
-    // Slide over text positions
     for (let i = 0; i <= text.length - len; i++) {
-      const slice = text.slice(i, i + len);
-      if (normThai(slice) === normTp) {
+      if (normThai(text.slice(i, i + len)) === normTp) {
         return { canonical: tp, pos: i, len };
       }
     }
-    // Also try shorter slices ±1 char for length mismatch (tone marks removed)
     for (const tryLen of [len - 1, len + 1]) {
       if (tryLen < 2 || tryLen > text.length) continue;
       for (let i = 0; i <= text.length - tryLen; i++) {
-        const slice = text.slice(i, i + tryLen);
-        if (normThai(slice) === normTp) {
+        if (normThai(text.slice(i, i + tryLen)) === normTp) {
           return { canonical: tp, pos: i, len: tryLen };
         }
       }
@@ -202,9 +239,31 @@ function parseThaiOrder(
     if (forceQty1) qty = 1;
 
     // ── Strip topping verb prefixes FIRST (before product match) ──
-    // Handles: ใส่บุก, เพิ่มไข่มุก, topping บุก, ท็อปบุก etc.
-    // Do a global replace so all occurrences are removed
     t = t.replace(TOPPING_PREFIX_RE, " ").replace(/\s+/g, " ").trim();
+
+    // ── Transliterate Latin topping words → Thai phonetic (e.g. Pop → ป๊อป) ──
+    // Also handle Latin word that is glued to or separated from a Thai prefix:
+    //   "มุก Pop" → "มุกป๊อป"  (space between Thai and Latin)
+    //   "มุกPop"  → "มุกป๊อป"  (no space)
+    // Strategy: replace \bLATIN\b OR Thai-adjacent Latin (preceded/followed by Thai char with optional space)
+    for (const [re, thai] of LATIN_TO_THAI) {
+      // Standard word-boundary replace (handles "Pop" standalone or space-separated)
+      t = t.replace(re, thai);
+    }
+    // Collapse space between Thai consonant and the EXACT transliterated words
+    // so "มุก ป๊อป" → "มุกป๊อป" but "ชาเย็น มุก" stays "ชาเย็น มุก"
+    const TRANSLATED_WORDS = ["ป๊อป", "สตรอ", "แอปเปิ้ล", "เผือก", "มัทฉะ"];
+    for (const tw of TRANSLATED_WORDS) {
+      // Only join when directly preceded by a Thai consonant (U+0E01-U+0E2E)
+      t = t.replace(new RegExp(`(?<=[\\u0E01-\\u0E2E]) ${tw}`, "gu"), tw);
+    }
+    t = t.replace(/\s+/g, " ").trim();
+
+    // ── Word-level alias substitution (e.g. กรีนชีค → ครีมชีส) ──
+    for (const [re, sub] of WORD_ALIASES) {
+      t = t.replace(re, sub);
+    }
+    t = t.replace(/\s+/g, " ").trim();
 
     // ── Extract toppings greedily (longest-first, with fuzzy normalize) ──
     const foundToppings: string[] = [];
@@ -237,6 +296,12 @@ function parseThaiOrder(
     }
     t = resolvedWords.join(" ").trim();
 
+    // ── Strip leftover Latin topping-fragment words (Pop, Strawberry …) ──
+    // These remain after a topping was successfully extracted (e.g. ไข่มุก Pop → ไข่มุก consumed, "Pop" left)
+    if (foundToppings.length > 0) {
+      t = t.replace(LATIN_TOPPING_FRAGMENTS, " ").replace(/\s+/g, " ").trim();
+    }
+
     // ── Match product name (longest first) from remaining text ──
     let matchedProduct: string | null = null;
     for (const pn of sortedProducts) {
@@ -244,6 +309,26 @@ function parseThaiOrder(
         matchedProduct = pn;
         t = t.replace(pn, " ").replace(/\s+/g, " ").trim();
         break;
+      }
+    }
+
+    // ── Try product aliases if no exact product match ──
+    if (!matchedProduct) {
+      for (const [re, canonical] of PRODUCT_ALIASES) {
+        if (re.test(t)) {
+          // Check if canonical name is in our product list (exact or prefix)
+          const found = sortedProducts.find(pn => pn === canonical || pn.startsWith(canonical.replace(/[เ-ๆ]+$/u, "")));
+          if (found) {
+            matchedProduct = found;
+            t = t.replace(re, " ").replace(/\s+/g, " ").trim();
+            break;
+          } else {
+            // Use canonical directly even if not in DB — better than leftover garbage
+            matchedProduct = canonical;
+            t = t.replace(re, " ").replace(/\s+/g, " ").trim();
+            break;
+          }
+        }
       }
     }
 
