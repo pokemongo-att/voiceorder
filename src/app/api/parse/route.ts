@@ -15,18 +15,18 @@ type ParsedItem = {
   sweetness: string | null;
 };
 
-// Sweetness patterns — detected and stripped BEFORE qty regex, no price impact
-const SWEETNESS_PATTERNS: [RegExp, string][] = [
-  [/ไม่(?:ใส่)?(?:น้ำตาล|หวาน)/g, "ไม่หวาน"],
-  [/หวานน้อย/g, "หวานน้อย"],
-  [/หวานปกติ/g, "หวานปกติ"],
-  [/เพิ่มหวาน/g, "เพิ่มหวาน"],
-  // "หวาน50" / "หวาน 25%" — any number after หวาน
-  [/หวาน\s*(\d+)\s*(?:เปอร์เซ็นต์|%)?/g, "__SWEET_NUM__"],
-];
+// Sweetness keyword regex — ordered longest-first so หวานน้อย matches before หวาน
+// Captures: (keyword)(optional number)(optional % or เปอร์เซ็นต์)
+const SWEETNESS_RE =
+  /(หวานน้อย|หวานมาก|หวานปกติ|เพิ่มหวาน|ไม่(?:ใส่)?(?:น้ำตาล|หวาน)|หวาน)\s*(\d+)?\s*(%|เปอร์เซ็นต์)?/g;
 
 // Topping keyword prefixes (synonyms for "add topping")
 const TOPPING_KEYWORDS = /(?:เพิ่ม|บวก|top|ท็อป|ใส่|พร้อม)\s*(?:topping|ท็อปปิ้ง)?\s*/gi;
+
+type SweetnessInfo = {
+  label: string;      // e.g. "หวานน้อย50%" or "หวานมาก"
+  forceQty1: boolean;  // true when number > 10 without explicit %
+};
 
 function parseThaiOrder(
   text: string,
@@ -41,25 +41,43 @@ function parseThaiOrder(
 
   if (!cleaned) return { items: [] };
 
-  // ── Step 0: Extract sweetness BEFORE splitting by numbers ──
-  // This prevents "หวาน50" from being interpreted as qty=50
-  let globalSweetness: string | null = null;
-  for (const [pat, label] of SWEETNESS_PATTERNS) {
-    const re = new RegExp(pat.source, pat.flags);
-    const m = re.exec(cleaned);
-    if (m) {
-      if (label === "__SWEET_NUM__") {
-        const num = parseInt(m[1], 10);
-        // Numbers > 10 are always sweetness %, not quantity
-        // Numbers <= 10 after หวาน are also sweetness if preceded by หวาน
-        globalSweetness = `หวาน${num}%`;
+  // ── Step 0: Extract ALL sweetness tokens → replace with markers ──
+  // This prevents "หวาน50" from being split by the chunk regex into qty=50
+  const sweetnessSlots: SweetnessInfo[] = [];
+
+  // Use private-use Unicode chars as markers (no digits → safe from chunk regex)
+  const marker = (i: number) => String.fromCharCode(0xE000 + i);
+
+  cleaned = cleaned.replace(SWEETNESS_RE, (_full, keyword: string, numStr?: string, pctSign?: string) => {
+    const idx = sweetnessSlots.length;
+    let label: string;
+    let forceQty1 = false;
+
+    if (numStr) {
+      const num = parseInt(numStr, 10);
+      if (pctSign) {
+        // Rule A: explicit % → always sweetness
+        label = `${keyword}${num}%`;
+      } else if (num > 10) {
+        // Rule B: no %, number > 10 → treat as sweetness %, force qty=1
+        label = `${keyword}${num}%`;
+        forceQty1 = true;
       } else {
-        globalSweetness = label;
+        // Number ≤ 10 without % → number is qty, sweetness = keyword only
+        // Put the number back so chunk splitter picks it up as qty
+        sweetnessSlots.push({ label: keyword, forceQty1: false });
+        return `${marker(idx)}${numStr}`;
       }
-      cleaned = cleaned.replace(re, " ").replace(/\s+/g, " ").trim();
-      break;
+    } else {
+      // No number → just the keyword (e.g. "หวานน้อย", "หวานมาก")
+      label = keyword;
     }
-  }
+
+    sweetnessSlots.push({ label, forceQty1 });
+    return marker(idx);
+  });
+
+  cleaned = cleaned.replace(/\s+/g, " ").trim();
 
   // Sort product names longest first for greedy matching
   const sortedProducts = [...productNames].sort((a, b) => b.length - a.length);
@@ -67,6 +85,7 @@ function parseThaiOrder(
   const sortedToppings = [...toppingNames].sort((a, b) => b.length - a.length);
 
   // ── Step 1: Split into raw chunks by regex: (non-digit text)(digits)(optional แก้ว) ──
+  // Markers (§S0§ etc.) are non-digit so they stay with their chunk
   type RawChunk = { raw: string; qty: number };
   const chunks: RawChunk[] = [];
 
@@ -94,29 +113,36 @@ function parseThaiOrder(
     chunks.push({ raw: cleaned, qty: 1 });
   }
 
-  // ── Step 2: Process each chunk — extract toppings, match product ──
+  // ── Step 2: Process each chunk — extract markers, toppings, match product ──
   const items: ParsedItem[] = [];
+  // Build regex that matches any of our private-use markers
+  const markerChars = sweetnessSlots.map((_, i) => marker(i));
+  const markerReStr = markerChars.length > 0
+    ? `[${markerChars.map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")}]`
+    : null;
 
   for (const chunk of chunks) {
     let t = chunk.raw.trim();
 
-    // Per-chunk sweetness override (if not already found globally)
-    let sweetness = globalSweetness;
-    if (!sweetness) {
-      for (const [pat, label] of SWEETNESS_PATTERNS) {
-        const re = new RegExp(pat.source, pat.flags);
-        const m = re.exec(t);
-        if (m) {
-          if (label === "__SWEET_NUM__") {
-            sweetness = `หวาน${m[1]}%`;
-          } else {
-            sweetness = label;
-          }
-          t = t.replace(re, " ").trim();
-          break;
-        }
+    // Extract sweetness markers from this chunk
+    let sweetness: string | null = null;
+    let forceQty1 = false;
+    for (let si = 0; si < sweetnessSlots.length; si++) {
+      const mc = marker(si);
+      if (t.includes(mc)) {
+        sweetness = sweetnessSlots[si].label;
+        forceQty1 = sweetnessSlots[si].forceQty1;
       }
     }
+    // Remove all marker chars from text
+    for (const mc of markerChars) {
+      t = t.split(mc).join(" ");
+    }
+    t = t.replace(/\s+/g, " ").trim();
+
+    // If forceQty1 (Rule B), override the chunk qty
+    let qty = chunk.qty;
+    if (forceQty1) qty = 1;
 
     // Remove topping keyword prefixes
     t = t.replace(TOPPING_KEYWORDS, " ").trim();
@@ -137,14 +163,12 @@ function parseThaiOrder(
     while (changed) {
       changed = false;
       for (const tp of sortedToppings) {
-        // Check as suffix
         if (t.endsWith(tp)) {
           foundToppings.unshift(tp);
           t = t.slice(0, -tp.length).trim();
           changed = true;
           break;
         }
-        // Check anywhere
         const idx = t.indexOf(tp);
         if (idx >= 0) {
           foundToppings.push(tp);
@@ -155,16 +179,25 @@ function parseThaiOrder(
       }
     }
 
-    // Whatever remains (after removing product + toppings) is used as menu name if no product matched
+    // Whatever remains is used as menu name if no product matched
     const leftover = t.replace(/\s+/g, " ").trim();
     const menuName = matchedProduct
       ? matchedProduct
-      : leftover || chunk.raw.trim();
+      : leftover || null;
 
     if (menuName) {
+      // Normal item with (possibly) sweetness
+      items.push({ menuName, qty, toppings: foundToppings, sweetness });
+    } else if (sweetness && items.length > 0) {
+      // Rule D: sweetness-only chunk → apply to nearest previous item
+      items[items.length - 1].sweetness = sweetness;
+    } else if (leftover || chunk.raw.trim()) {
+      // Fallback: push whatever we have
+      let fallbackRaw = chunk.raw;
+      for (const mc of markerChars) fallbackRaw = fallbackRaw.split(mc).join("");
       items.push({
-        menuName,
-        qty: chunk.qty,
+        menuName: fallbackRaw.replace(/\s+/g, " ").trim() || "ไม่ทราบชื่อ",
+        qty,
         toppings: foundToppings,
         sweetness
       });
@@ -172,7 +205,10 @@ function parseThaiOrder(
   }
 
   if (items.length === 0) {
-    return { items: [{ menuName: cleaned, qty: 1, toppings: [], sweetness: globalSweetness }] };
+    let fallbackName = cleaned;
+    for (const mc of markerChars) fallbackName = fallbackName.split(mc).join("");
+    fallbackName = fallbackName.replace(/\s+/g, " ").trim();
+    return { items: [{ menuName: fallbackName || text.trim(), qty: 1, toppings: [], sweetness: sweetnessSlots[0]?.label ?? null }] };
   }
 
   return { items };
