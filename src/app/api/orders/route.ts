@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { z } from "zod";
 import { db } from "@/db/client";
 import { products, orders, orderItems, shopSessions, toppings } from "@/db/schema";
-import { eq, isNull, desc } from "drizzle-orm";
+import { eq, isNull, desc, and, gte, lt, sql, count } from "drizzle-orm";
 import { getSession } from "@/lib/auth";
 
 const DEFAULT_PRICE = Number(process.env.DEFAULT_PRICE || "20");
@@ -18,13 +18,53 @@ const BodySchema = z.object({
   })).min(1)
 });
 
-export async function GET() {
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const dateStr = searchParams.get("date");
+  const staffId = searchParams.get("staffId");
+  const page = Math.max(1, parseInt(searchParams.get("page") || "1", 10));
+  const limit = Math.min(100, Math.max(1, parseInt(searchParams.get("limit") || "20", 10)));
+  const offset = (page - 1) * limit;
+
+  // Build where conditions
+  const conditions: any[] = [];
+  if (dateStr) {
+    const dayStart = new Date(dateStr + "T00:00:00.000+07:00");
+    const dayEnd = new Date(dateStr + "T23:59:59.999+07:00");
+    conditions.push(gte(orders.createdAt, dayStart));
+    conditions.push(lt(orders.createdAt, dayEnd));
+  }
+  if (staffId) {
+    conditions.push(eq(orders.staffId, staffId));
+  }
+
+  const where = conditions.length > 0 ? and(...conditions) : undefined;
+
+  // Total count
+  const totalResult = await db.select({ count: count() }).from(orders).where(where);
+  const total = Number(totalResult[0]?.count ?? 0);
+
+  // Fetch orders
   const rows = await db
     .select()
     .from(orders)
+    .where(where)
     .orderBy(desc(orders.createdAt))
-    .limit(50);
-  return NextResponse.json({ ok: true, orders: rows });
+    .limit(limit)
+    .offset(offset);
+
+  // Fetch items per order
+  const ordersWithItems = [];
+  for (const o of rows) {
+    const items = await db.select().from(orderItems).where(eq(orderItems.orderId, o.id));
+    ordersWithItems.push({ ...o, items });
+  }
+
+  return NextResponse.json({
+    ok: true,
+    orders: ordersWithItems,
+    pagination: { page, limit, total, totalPages: Math.ceil(total / limit) }
+  });
 }
 
 export async function POST(req: Request) {
@@ -117,6 +157,14 @@ export async function POST(req: Request) {
       });
     }
 
+    // Calculate order_no for current session
+    const sessionOpenedAt = openSessions[0].openedAt;
+    const orderCountResult = await db
+      .select({ cnt: count() })
+      .from(orders)
+      .where(gte(orders.createdAt, sessionOpenedAt));
+    const orderNo = Number(orderCountResult[0]?.cnt ?? 0) + 1;
+
     // Create order
     const created = await db.insert(orders).values({
       rawText: body.rawText,
@@ -124,8 +172,9 @@ export async function POST(req: Request) {
       staffId,
       totalAmount: String(totalAmount),
       totalQty,
-      status: "open"
-    }).returning({ id: orders.id, createdAt: orders.createdAt });
+      status: "open",
+      orderNo
+    }).returning({ id: orders.id, createdAt: orders.createdAt, orderNo: orders.orderNo });
 
     const orderId = created[0]?.id;
     const confirmedAt = created[0]?.createdAt;
@@ -149,6 +198,7 @@ export async function POST(req: Request) {
     return NextResponse.json({
       ok: true,
       orderId,
+      orderNo: created[0]?.orderNo,
       confirmedAt,
       totalAmount,
       totalQty,

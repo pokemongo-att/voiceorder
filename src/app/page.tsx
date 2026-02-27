@@ -194,73 +194,41 @@ export default function HomePage() {
   }
 
   return (
-    <main className="grid gap-4 pb-24 lg:grid-cols-[1.2fr_1fr]">
-      {/* Staff selector + voice input */}
-      <section className="card p-5 lg:col-span-2">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <h2 className="card-title">🎤 รับออเดอร์ด้วยเสียง</h2>
-            <p className="mt-1 text-sm text-slate-600">พูดได้หลายรอบ รายการจะต่อกันจนกว่าจะกดบันทึก</p>
-          </div>
-          <div className="flex items-center gap-2">
-            <label className="text-xs font-medium text-slate-500">พนักงาน:</label>
-            <select
-              value={selectedStaff}
-              onChange={(e) => setSelectedStaff(e.target.value)}
-              className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm"
-            >
-              <option value="">-- เลือก --</option>
-              {staffList.map((s) => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-          </div>
+    <main className="grid gap-4 pb-24 lg:grid-cols-[1fr_1fr]">
+      {/* ── Mic + Staff (top, full width) ── */}
+      <section className="card p-4 sm:p-5 lg:col-span-2">
+        <div className="flex items-center justify-between gap-3">
+          <select
+            value={selectedStaff}
+            onChange={(e) => setSelectedStaff(e.target.value)}
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm"
+          >
+            <option value="">-- พนักงาน --</option>
+            {staffList.map((s) => (
+              <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+          <span className="text-xs text-slate-400">พูดได้หลายรอบ</span>
         </div>
 
         {!supported && (
-          <p className="mt-4 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+          <p className="mt-3 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
             อุปกรณ์นี้ไม่รองรับ SpeechRecognition (แนะนำ Chrome บน Android)
           </p>
         )}
 
-        <div className="mt-4 flex items-center gap-3">
+        <div className="mt-4 flex flex-col items-center gap-2">
           <button
             onClick={startListening}
             disabled={!supported || listening}
-            className={`mic-btn flex h-16 w-16 items-center justify-center rounded-full text-2xl text-white transition ${listening ? "animate-pulse-mic bg-emerald-500" : "bg-slate-900 hover:bg-slate-800"} disabled:cursor-not-allowed disabled:bg-slate-400`}
+            className={`mic-btn flex h-20 w-20 items-center justify-center rounded-full text-3xl text-white shadow-lg transition active:scale-95 ${listening ? "animate-pulse-mic bg-emerald-500 shadow-emerald-200" : "bg-slate-900 hover:bg-slate-800 shadow-slate-300"} disabled:cursor-not-allowed disabled:bg-slate-400 disabled:shadow-none`}
           >
             🎤
           </button>
-          <div className="text-sm text-slate-600">
-            {listening ? <span className="font-semibold text-emerald-600">กำลังฟัง...</span> : "กดปุ่มไมค์แล้วพูด"}
-          </div>
+          <span className="text-sm text-slate-500">
+            {listening ? <b className="text-emerald-600">กำลังฟัง...</b> : "กดไมค์แล้วพูด"}
+          </span>
         </div>
-
-        <p className="mt-3 text-xs text-slate-500">
-          ตัวอย่าง: <b>ชาเย็นบุก2แก้ว</b> / <b>ชาเขียวหวานน้อย 2</b> / <b>โกโก้ เพิ่มครีมชีส 1</b>
-        </p>
-      </section>
-
-      {/* Voice entries list + manual input */}
-      <section className="card p-5">
-        <h3 className="card-title">ข้อความจากเสียง</h3>
-        <p className="subtle mt-1">แต่ละรอบพูดจะต่อเป็นรายการ ลบได้ทีละรอบ</p>
-
-        {entries.length > 0 && (
-          <ul className="mt-3 space-y-1.5">
-            {entries.map((entry) => (
-              <li key={entry.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-2">
-                <span className="text-sm text-slate-700">{entry.text}</span>
-                <button
-                  onClick={() => removeEntry(entry.id)}
-                  className="shrink-0 rounded-md border border-rose-200 px-2 py-0.5 text-xs text-rose-600 hover:bg-rose-50"
-                >
-                  ❌
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
 
         <div className="mt-3 flex gap-2">
           <input
@@ -272,7 +240,7 @@ export default function HomePage() {
                 setManualText("");
               }
             }}
-            placeholder="พิมพ์เพิ่มเอง เช่น ชาเย็นบุก 2"
+            placeholder="หรือพิมพ์เอง เช่น ชาเย็นบุก 2"
             className="soft-input flex-1"
           />
           <button
@@ -283,22 +251,22 @@ export default function HomePage() {
               }
             }}
             disabled={!manualText.trim()}
-            className="shrink-0 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-orange-300 disabled:opacity-40"
+            className="shrink-0 rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:opacity-40"
           >
             เพิ่ม
           </button>
         </div>
       </section>
 
-      {/* Preview */}
-      <section className="card p-5">
+      {/* ── Preview (shows FIRST on mobile) ── */}
+      <section className="card order-1 p-4 sm:p-5 lg:order-none">
         <div className="flex items-center justify-between gap-2">
           <h3 className="card-title">Preview รายการ</h3>
           <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">{totalQty} แก้ว</span>
         </div>
 
         {items.length === 0 ? (
-          <p className="mt-3 text-sm text-slate-500">ยังไม่มีรายการ</p>
+          <p className="mt-3 text-sm text-slate-500">ยังไม่มีรายการ — กดไมค์แล้วพูดสั่ง</p>
         ) : (
           <>
             <ul className="mt-3 space-y-2">
@@ -307,17 +275,17 @@ export default function HomePage() {
                 return (
                   <li key={idx} className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
+                      <div className="min-w-0">
                         <b className="text-slate-800">{it.menuName}</b>
                         {(it.toppings?.length ?? 0) > 0 && (
                           <span className="ml-1 text-xs text-orange-600">+{it.toppings!.join("+")}</span>
                         )}
                         {it.sweetness && (
-                          <span className="ml-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">{it.sweetness}</span>
+                          <span className="ml-1 inline-block rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-700">{it.sweetness}</span>
                         )}
                         <span className="ml-2 text-xs text-slate-500">฿{unitPrice}/แก้ว</span>
                       </div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1.5">
                         <input
                           type="number"
                           min={1}
@@ -330,9 +298,9 @@ export default function HomePage() {
                               return { ...x, qty: v, subtotal: up * v };
                             }));
                           }}
-                          className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-center text-sm"
+                          className="w-14 rounded-lg border border-slate-200 bg-white px-1 py-1 text-center text-sm"
                         />
-                        <span className="min-w-[60px] text-right text-sm font-semibold text-slate-700">฿{it.subtotal ?? 0}</span>
+                        <span className="min-w-[52px] text-right text-sm font-semibold text-slate-700">฿{it.subtotal ?? 0}</span>
                         <button
                           onClick={() => removeItemAt(idx)}
                           className="rounded-md border border-rose-200 px-2 py-1 text-xs font-medium text-rose-600 hover:bg-rose-50"
@@ -348,7 +316,7 @@ export default function HomePage() {
 
             <div className="mt-3 flex items-center justify-between rounded-xl bg-slate-900 px-4 py-3 text-white">
               <div>
-                <span className="text-sm font-medium">รวมทั้งหมด</span>
+                <span className="text-sm font-medium">รวม</span>
                 <span className="ml-2 text-lg font-bold">฿{total.toLocaleString()}</span>
               </div>
               <button
@@ -364,6 +332,30 @@ export default function HomePage() {
         {status && <p className={`mt-3 rounded-xl border px-3 py-2 text-sm font-medium ${statusTone}`}>{status}</p>}
       </section>
 
+      {/* ── Voice entries (below Preview on mobile) ── */}
+      <section className="card order-2 p-4 sm:p-5 lg:order-none">
+        <h3 className="card-title">ข้อความจากเสียง</h3>
+        <p className="subtle mt-1">แต่ละรอบพูดจะต่อเป็นรายการ ลบได้ทีละรอบ</p>
+
+        {entries.length === 0 ? (
+          <p className="mt-3 text-sm text-slate-400">ยังไม่มีข้อความ</p>
+        ) : (
+          <ul className="mt-3 space-y-1.5">
+            {entries.map((entry) => (
+              <li key={entry.id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-200 bg-slate-50/80 px-3 py-2">
+                <span className="text-sm text-slate-700">{entry.text}</span>
+                <button
+                  onClick={() => removeEntry(entry.id)}
+                  className="shrink-0 rounded-md border border-rose-200 px-2 py-0.5 text-xs text-rose-600 hover:bg-rose-50"
+                >
+                  ✕
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {/* Sticky confirm button */}
       {items.length > 0 && (
         <div className="fixed inset-x-0 bottom-0 z-50 border-t border-slate-200 bg-white/95 px-4 py-3 backdrop-blur-sm lg:col-span-2">
@@ -373,7 +365,7 @@ export default function HomePage() {
             </div>
             <button
               onClick={saveOrder}
-              className="rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-500"
+              className="rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-bold text-white transition hover:bg-emerald-500 active:scale-95"
             >
               ยืนยันบันทึก
             </button>

@@ -69,6 +69,7 @@ export const orders = pgTable(
     totalAmount: numeric("total_amount", { precision: 10, scale: 2 }).notNull().default("0"),
     totalQty: integer("total_qty").notNull().default(0),
     status: text("status").notNull().default("open"),
+    orderNo: integer("order_no"),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow()
   },
   (t) => ({
